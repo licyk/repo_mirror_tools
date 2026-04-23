@@ -15,6 +15,7 @@ from sd_webui_all_in_one import logger, VERSION, BaseManager  # type: ignore
 from sd_webui_all_in_one.utils import clear_jupyter_output  # type: ignore
 from sd_webui_all_in_one.env_manager import configure_pip  # type: ignore
 from sd_webui_all_in_one.pkg_manager import install_manager_depend  # type: ignore
+from sd_webui_all_in_one.retry_decorator import retryable  # type: ignore
 
 
 class RepoMirrorTools(BaseManager):
@@ -246,72 +247,56 @@ class RepoMirrorTools(BaseManager):
         files_count = len(need_sync_files)
         logger.info("需要镜像的文件数量: %s", files_count)
 
+        @retryable(times=retry, describe="镜像文件")
         def worker(
             file: str,
             index: int,
         ) -> bool:
-            local_retry = 0
             tmp_dir = self.workspace / f"{uuid.uuid4()}"
-            while local_retry < retry:
-                try:
-                    logger.info("[%s/%s] 镜像 %s", index, files_count, file)
+            logger.info("[%s/%s] 镜像 %s", index, files_count, file)
 
-                    # 下载
-                    if src_repo == "huggingface":
-                        self.repo_manager.hf_api.hf_hub_download(
-                            repo_id=src_repo_id,
-                            repo_type=src_repo_type,
-                            filename=file,
-                            local_dir=tmp_dir,
-                        )
-                    else:
-                        snapshot_download(
-                            repo_id=src_repo_id,
-                            repo_type=src_repo_type,
-                            allow_patterns=file,
-                            local_dir=tmp_dir,
-                        )
+            # 下载
+            if src_repo == "huggingface":
+                self.repo_manager.hf_api.hf_hub_download(
+                    repo_id=src_repo_id,
+                    repo_type=src_repo_type,
+                    filename=file,
+                    local_dir=tmp_dir,
+                )
+            else:
+                snapshot_download(
+                    repo_id=src_repo_id,
+                    repo_type=src_repo_type,
+                    allow_patterns=file,
+                    local_dir=tmp_dir,
+                )
 
-                    file_path = tmp_dir / file
+            file_path = tmp_dir / file
 
-                    # 上传
-                    if dst_repo == "huggingface":
-                        self.repo_manager.hf_api.upload_file(
-                            path_or_fileobj=file_path,
-                            path_in_repo=file,
-                            repo_id=dst_repo_id,
-                            repo_type=dst_repo_type,
-                            commit_message=f"Upload {file}",
-                        )
-                    else:
-                        self.repo_manager.ms_api.upload_file(
-                            path_or_fileobj=file_path,
-                            path_in_repo=file,
-                            repo_id=dst_repo_id,
-                            repo_type=dst_repo_type,
-                            commit_message=f"Upload {file}",
-                            token=self.repo_manager.ms_token,
-                        )
+            # 上传
+            if dst_repo == "huggingface":
+                self.repo_manager.hf_api.upload_file(
+                    path_or_fileobj=file_path,
+                    path_in_repo=file,
+                    repo_id=dst_repo_id,
+                    repo_type=dst_repo_type,
+                    commit_message=f"Upload {file}",
+                )
+            else:
+                self.repo_manager.ms_api.upload_file(
+                    path_or_fileobj=file_path,
+                    path_in_repo=file,
+                    repo_id=dst_repo_id,
+                    repo_type=dst_repo_type,
+                    commit_message=f"Upload {file}",
+                    token=self.repo_manager.ms_token,
+                )
 
-                    # 删除临时文件
-                    if tmp_dir.exists():
-                        self.remove_files(tmp_dir)
+            # 删除临时文件
+            if tmp_dir.exists():
+                self.remove_files(tmp_dir)
 
-                    return True
-
-                except Exception as e:
-                    traceback.print_exc()
-                    local_retry += 1
-                    logger.error(
-                        "[%s/%s] %s 失败 (retry=%s): %s",
-                        index,
-                        files_count,
-                        file,
-                        local_retry,
-                        e,
-                    )
-
-            return False
+            return True
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
@@ -320,7 +305,10 @@ class RepoMirrorTools(BaseManager):
             ]
 
             for f in tqdm(as_completed(futures), total=files_count):
-                f.result()  # 触发异常
+                try:
+                    f.result()
+                except Exception:
+                    traceback.print_exc()
 
         logger.info("镜像仓库完成")
 
