@@ -6,6 +6,10 @@ import traceback
 import uuid
 from typing import Literal
 from pathlib import Path
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    as_completed,
+)
 
 from sd_webui_all_in_one import logger, VERSION, BaseManager  # type: ignore
 from sd_webui_all_in_one.utils import clear_jupyter_output  # type: ignore
@@ -130,6 +134,7 @@ class RepoMirrorTools(BaseManager):
         dst_repo_type: Literal["model", "dataset", "space"] = "model",
         visibility: bool | None = False,
         retry: int | None = 3,
+        max_workers: int | None = 1,
     ) -> None:
         """
         镜像 HuggingFace / ModelScope 仓库.
@@ -143,6 +148,7 @@ class RepoMirrorTools(BaseManager):
             dst_repo_type (Literal["model", "dataset", "space"]): 目标仓库类型.
             visibility (bool | None): 当目标仓库不存在时自动创建的仓库可见性.
             retry (int | None): 上传重试次数.
+            max_workers (int | None): 同步使用的线程数
         """
         if src_repo not in ["huggingface", "modelscope"]:
             logger.error("未知的镜像仓库类型: %s", src_repo)
@@ -177,6 +183,7 @@ class RepoMirrorTools(BaseManager):
             src_repo_type=src_repo_type,
             dst_repo_type=dst_repo_type,
             retry=retry,
+            max_workers=max_workers,
         )
         src_repo_url = self.generate_repo_url(
             api_type=src_repo,
@@ -199,6 +206,7 @@ class RepoMirrorTools(BaseManager):
         src_repo_type: Literal["model", "dataset", "space"] = "model",
         dst_repo_type: Literal["model", "dataset", "space"] = "model",
         retry: int | None = 3,
+        max_workers: int | None = 1,
     ) -> None:
         """
         镜像 HuggingFace / ModelScope 仓库文件.
@@ -211,6 +219,7 @@ class RepoMirrorTools(BaseManager):
             src_repo_type (Literal["model", "dataset", "space"]): 源仓库类型.
             dst_repo_type (Literal["model", "dataset", "space"]): 目标仓库类型.
             retry (int | None): 上传重试次数.
+            max_workers (int | None): 同步使用的线程数
         """
         from tqdm import tqdm
         from modelscope import snapshot_download
@@ -236,21 +245,18 @@ class RepoMirrorTools(BaseManager):
         ]
         files_count = len(need_sync_files)
         logger.info("需要镜像的文件数量: %s", files_count)
-        count = 0
-        retry_sum = 0
-        tmp_dir = self.workspace / f"{uuid.uuid4()}"
-        for file in need_sync_files:
-            count += 1
-            logger.info(
-                "[%s/%s] 镜像 %s 到 %s (类型: %s) 中",
-                count,
-                files_count,
-                file,
-                dst_repo_id,
-                dst_repo_type,
-            )
-            while retry_sum < retry:
+
+        def worker(
+            file: str,
+            index: int,
+        ) -> bool:
+            local_retry = 0
+            tmp_dir = self.workspace / f"{uuid.uuid4()}"
+            while local_retry < retry:
                 try:
+                    logger.info("[%s/%s] 镜像 %s", index, files_count, file)
+
+                    # 下载
                     if src_repo == "huggingface":
                         self.repo_manager.hf_api.hf_hub_download(
                             repo_id=src_repo_id,
@@ -258,14 +264,17 @@ class RepoMirrorTools(BaseManager):
                             filename=file,
                             local_dir=tmp_dir,
                         )
-                    elif src_repo == "modelscope":
+                    else:
                         snapshot_download(
                             repo_id=src_repo_id,
                             repo_type=src_repo_type,
                             allow_patterns=file,
                             local_dir=tmp_dir,
                         )
+
                     file_path = tmp_dir / file
+
+                    # 上传
                     if dst_repo == "huggingface":
                         self.repo_manager.hf_api.upload_file(
                             path_or_fileobj=file_path,
@@ -274,7 +283,7 @@ class RepoMirrorTools(BaseManager):
                             repo_type=dst_repo_type,
                             commit_message=f"Upload {file}",
                         )
-                    elif dst_repo == "modelscope":
+                    else:
                         self.repo_manager.ms_api.upload_file(
                             path_or_fileobj=file_path,
                             path_in_repo=file,
@@ -283,18 +292,37 @@ class RepoMirrorTools(BaseManager):
                             commit_message=f"Upload {file}",
                             token=self.repo_manager.ms_token,
                         )
-                    self.remove_files(file_path)
-                    break
+
+                    # 删除临时文件
+                    if tmp_dir.exists():
+                        self.remove_files(tmp_dir)
+
+                    return True
+
                 except Exception as e:
                     traceback.print_exc()
+                    local_retry += 1
                     logger.error(
-                        "[%s/%s] 镜像 %s 时发生了错误: %s", count, files_count, file, e
+                        "[%s/%s] %s 失败 (retry=%s): %s",
+                        index,
+                        files_count,
+                        file,
+                        local_retry,
+                        e,
                     )
-                    if retry_sum < retry:
-                        logger.warning("重新镜像 %s 中", file)
+
+            return False
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(worker, file, idx)
+                for idx, file in enumerate(need_sync_files, 1)
+            ]
+
+            for f in tqdm(as_completed(futures), total=files_count):
+                f.result()  # 触发异常
+
         logger.info("镜像仓库完成")
-        if tmp_dir.exists():
-            self.remove_files(tmp_dir)
 
     def install(
         self,
