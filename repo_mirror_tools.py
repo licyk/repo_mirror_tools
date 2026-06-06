@@ -193,56 +193,6 @@ class RepoMirrorTools(BaseManager):
         )
         logger.info("%s -> %s", src_repo_url, dst_repo_url)
 
-    def make_hf_or_ms_repo_mirror(
-        self,
-        src_repo: Literal["huggingface", "modelscope"],
-        dst_repo: Literal["huggingface", "modelscope"],
-        src_repo_id: str,
-        dst_repo_id: str,
-        src_repo_type: Literal["model", "dataset", "space"] = "model",
-        dst_repo_type: Literal["model", "dataset", "space"] = "model",
-        retry: int = 3,
-        max_workers: int = 1,
-        revision: str | None = None,
-        use_fast_download: bool = False,
-        download_tool: Literal["aria2", "requests", "urllib"] | None = "requests",
-        download_num_threads: int = 8,
-        download_progress: bool = True,
-    ) -> None:
-        """
-        镜像 HuggingFace / ModelScope 仓库文件.
-
-        Args:
-            src_repo (Literal["huggingface", "modelscope"]): 源仓库类型.
-            dst_repo (Literal["huggingface", "modelscope"]): 目标仓库类型.
-            src_repo_id (str): 源仓库 ID.
-            dst_repo_id (str): 目标仓库 ID.
-            src_repo_type (Literal["model", "dataset", "space"]): 源仓库类型.
-            dst_repo_type (Literal["model", "dataset", "space"]): 目标仓库类型.
-            retry (int): 单个文件镜像失败后的重试次数.
-            max_workers (int): 同步使用的线程数.
-            revision (str | None): 指定仓库分支、标签或提交哈希.
-            use_fast_download (bool): 是否使用 sd-webui-all-in-one 下载器高速下载.
-            download_tool (Literal["aria2", "requests", "urllib"] | None): 高速下载使用的下载器.
-            download_num_threads (int): 高速下载线程数.
-            download_progress (bool): 高速下载时是否显示下载进度.
-        """
-        self.mirror_repo_files(
-            src_api_type=src_repo,
-            dst_api_type=dst_repo,
-            src_repo_id=src_repo_id,
-            dst_repo_id=dst_repo_id,
-            src_repo_type=src_repo_type,
-            dst_repo_type=dst_repo_type,
-            revision=revision,
-            num_threads=max_workers,
-            retry_times=retry,
-            use_fast_download=use_fast_download,
-            download_tool=download_tool,
-            download_num_threads=download_num_threads,
-            download_progress=download_progress,
-        )
-
     def install(
         self,
         use_uv: bool | None = True,
