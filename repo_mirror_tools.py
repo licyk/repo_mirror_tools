@@ -2,20 +2,13 @@
 # pylint: disable=broad-exception-caught,import-outside-toplevel
 
 import sys
-import traceback
-import uuid
 from typing import Literal
 from pathlib import Path
-from concurrent.futures import (
-    ThreadPoolExecutor,
-    as_completed,
-)
 
 from sd_webui_all_in_one import logger, VERSION, BaseManager  # type: ignore
 from sd_webui_all_in_one.utils import clear_jupyter_output  # type: ignore
 from sd_webui_all_in_one.env_manager import configure_pip  # type: ignore
 from sd_webui_all_in_one.pkg_manager import install_manager_depend  # type: ignore
-from sd_webui_all_in_one.retry_decorator import retryable  # type: ignore
 
 
 class RepoMirrorTools(BaseManager):
@@ -133,9 +126,14 @@ class RepoMirrorTools(BaseManager):
         dst_repo_id: str,
         src_repo_type: Literal["model", "dataset", "space"] = "model",
         dst_repo_type: Literal["model", "dataset", "space"] = "model",
-        visibility: bool | None = False,
-        retry: int | None = 3,
-        max_workers: int | None = 1,
+        visibility: bool = False,
+        revision: str | None = None,
+        retry: int = 3,
+        max_workers: int = 1,
+        use_fast_download: bool = False,
+        download_tool: Literal["aria2", "requests", "urllib"] | None = "requests",
+        download_num_threads: int = 8,
+        download_progress: bool = True,
     ) -> None:
         """
         镜像 HuggingFace / ModelScope 仓库.
@@ -147,9 +145,14 @@ class RepoMirrorTools(BaseManager):
             dst_repo_id (str): 目标仓库 ID.
             src_repo_type (Literal["model", "dataset", "space"]): 源仓库类型.
             dst_repo_type (Literal["model", "dataset", "space"]): 目标仓库类型.
-            visibility (bool | None): 当目标仓库不存在时自动创建的仓库可见性.
-            retry (int | None): 上传重试次数.
-            max_workers (int | None): 同步使用的线程数
+            visibility (bool): 当目标仓库不存在时自动创建的仓库可见性.
+            revision (str | None): 指定仓库分支、标签或提交哈希.
+            retry (int): 单个文件镜像失败后的重试次数.
+            max_workers (int): 同步使用的线程数.
+            use_fast_download (bool): 是否使用 sd-webui-all-in-one 下载器高速下载.
+            download_tool (Literal["aria2", "requests", "urllib"] | None): 高速下载使用的下载器.
+            download_num_threads (int): 高速下载线程数.
+            download_progress (bool): 高速下载时是否显示下载进度.
         """
         if src_repo not in ["huggingface", "modelscope"]:
             logger.error("未知的镜像仓库类型: %s", src_repo)
@@ -162,29 +165,21 @@ class RepoMirrorTools(BaseManager):
             "镜像仓库: %s/%s -> %s/%s", src_repo, src_repo_id, dst_repo, dst_repo_id
         )
 
-        if not self.repo_manager.check_repo(
-            api_type=dst_repo,
-            repo_id=dst_repo_id,
-            repo_type=dst_repo_type,
-            visibility=visibility,
-        ):
-            logger.error(
-                "检查 %s/%s (类型: %s) 仓库失败, 无法镜像仓库",
-                dst_repo,
-                dst_repo_id,
-                dst_repo_type,
-            )
-            return
-
-        self.make_hf_or_ms_repo_mirror(
-            src_repo=src_repo,
-            dst_repo=dst_repo,
+        self.mirror_repo_files(
+            src_api_type=src_repo,
+            dst_api_type=dst_repo,
             src_repo_id=src_repo_id,
             dst_repo_id=dst_repo_id,
             src_repo_type=src_repo_type,
             dst_repo_type=dst_repo_type,
-            retry=retry,
-            max_workers=max_workers,
+            visibility=visibility,
+            revision=revision,
+            num_threads=max_workers,
+            retry_times=retry,
+            use_fast_download=use_fast_download,
+            download_tool=download_tool,
+            download_num_threads=download_num_threads,
+            download_progress=download_progress,
         )
         src_repo_url = self.generate_repo_url(
             api_type=src_repo,
@@ -206,8 +201,13 @@ class RepoMirrorTools(BaseManager):
         dst_repo_id: str,
         src_repo_type: Literal["model", "dataset", "space"] = "model",
         dst_repo_type: Literal["model", "dataset", "space"] = "model",
-        retry: int | None = 3,
-        max_workers: int | None = 1,
+        retry: int = 3,
+        max_workers: int = 1,
+        revision: str | None = None,
+        use_fast_download: bool = False,
+        download_tool: Literal["aria2", "requests", "urllib"] | None = "requests",
+        download_num_threads: int = 8,
+        download_progress: bool = True,
     ) -> None:
         """
         镜像 HuggingFace / ModelScope 仓库文件.
@@ -219,98 +219,29 @@ class RepoMirrorTools(BaseManager):
             dst_repo_id (str): 目标仓库 ID.
             src_repo_type (Literal["model", "dataset", "space"]): 源仓库类型.
             dst_repo_type (Literal["model", "dataset", "space"]): 目标仓库类型.
-            retry (int | None): 上传重试次数.
-            max_workers (int | None): 同步使用的线程数
+            retry (int): 单个文件镜像失败后的重试次数.
+            max_workers (int): 同步使用的线程数.
+            revision (str | None): 指定仓库分支、标签或提交哈希.
+            use_fast_download (bool): 是否使用 sd-webui-all-in-one 下载器高速下载.
+            download_tool (Literal["aria2", "requests", "urllib"] | None): 高速下载使用的下载器.
+            download_num_threads (int): 高速下载线程数.
+            download_progress (bool): 高速下载时是否显示下载进度.
         """
-        from tqdm import tqdm
-        from modelscope import snapshot_download
-
-        src_repo_files = set(
-            self.repo_manager.get_repo_file(
-                api_type=src_repo,
-                repo_id=src_repo_id,
-                repo_type=src_repo_type,
-            )
+        self.mirror_repo_files(
+            src_api_type=src_repo,
+            dst_api_type=dst_repo,
+            src_repo_id=src_repo_id,
+            dst_repo_id=dst_repo_id,
+            src_repo_type=src_repo_type,
+            dst_repo_type=dst_repo_type,
+            revision=revision,
+            num_threads=max_workers,
+            retry_times=retry,
+            use_fast_download=use_fast_download,
+            download_tool=download_tool,
+            download_num_threads=download_num_threads,
+            download_progress=download_progress,
         )
-        dst_repo_files = set(
-            self.repo_manager.get_repo_file(
-                api_type=dst_repo,
-                repo_id=dst_repo_id,
-                repo_type=dst_repo_type,
-            )
-        )
-        need_sync_files = [
-            x
-            for x in tqdm(src_repo_files, desc=f"统计需要镜像到 {dst_repo} 的文件")
-            if x not in dst_repo_files
-        ]
-        files_count = len(need_sync_files)
-        logger.info("需要镜像的文件数量: %s", files_count)
-
-        @retryable(times=retry, describe="镜像文件")
-        def worker(
-            file: str,
-            index: int,
-        ) -> bool:
-            tmp_dir = self.workspace / f"{uuid.uuid4()}"
-            logger.info("[%s/%s] 镜像 %s", index, files_count, file)
-
-            # 下载
-            if src_repo == "huggingface":
-                self.repo_manager.hf_api.hf_hub_download(
-                    repo_id=src_repo_id,
-                    repo_type=src_repo_type,
-                    filename=file,
-                    local_dir=tmp_dir,
-                )
-            else:
-                snapshot_download(
-                    repo_id=src_repo_id,
-                    repo_type=src_repo_type,
-                    allow_patterns=file,
-                    local_dir=tmp_dir,
-                )
-
-            file_path = tmp_dir / file
-
-            # 上传
-            if dst_repo == "huggingface":
-                self.repo_manager.hf_api.upload_file(
-                    path_or_fileobj=file_path,
-                    path_in_repo=file,
-                    repo_id=dst_repo_id,
-                    repo_type=dst_repo_type,
-                    commit_message=f"Upload {file}",
-                )
-            else:
-                self.repo_manager.ms_api.upload_file(
-                    path_or_fileobj=file_path,
-                    path_in_repo=file,
-                    repo_id=dst_repo_id,
-                    repo_type=dst_repo_type,
-                    commit_message=f"Upload {file}",
-                    token=self.repo_manager.ms_token,
-                )
-
-            # 删除临时文件
-            if tmp_dir.exists():
-                self.remove_files(tmp_dir)
-
-            return True
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [
-                executor.submit(worker, file, idx)
-                for idx, file in enumerate(need_sync_files, 1)
-            ]
-
-            for f in tqdm(as_completed(futures), total=files_count):
-                try:
-                    f.result()
-                except Exception:
-                    traceback.print_exc()
-
-        logger.info("镜像仓库完成")
 
     def install(
         self,
