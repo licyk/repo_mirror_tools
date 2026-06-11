@@ -223,7 +223,7 @@ class RepoMirrorTools(BaseManager):
             modelscope_token
         ):
             logger.warning("请检查 ModelScope Token 是否可用")
-        self.restart_repo_manager(
+        self.repo_manager.configure_tokens(
             hf_token=huggingface_token,
             ms_token=modelscope_token,
         )
