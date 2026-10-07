@@ -178,7 +178,7 @@ class RepoMirrorTools(BaseManager):
             retry_times=retry,
             use_fast_download=use_fast_download,
             download_tool=download_tool,
-            download_num_threads=download_num_threads,
+            download_split=download_num_threads,
             download_progress=download_progress,
         )
         src_repo_url = self.generate_repo_url(
@@ -195,7 +195,7 @@ class RepoMirrorTools(BaseManager):
 
     def install(
         self,
-        use_uv: bool | None = True,
+        use_uv: bool = True,
         huggingface_token: str | None = None,
         modelscope_token: str | None = None,
         clean_install_log: bool | None = False,
