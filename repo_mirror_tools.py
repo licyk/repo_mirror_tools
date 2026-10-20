@@ -134,6 +134,10 @@ class RepoMirrorTools(BaseManager):
         download_tool: Literal["aria2", "requests", "urllib"] | None = "requests",
         download_num_threads: int = 8,
         download_progress: bool = True,
+        use_group_mirror: bool = False,
+        group_size: int = 10,
+        reserved_disk_space_gb: float = 5.0,
+        work_dir: str | None = None,
     ) -> None:
         """
         镜像 HuggingFace / ModelScope 仓库.
@@ -153,6 +157,10 @@ class RepoMirrorTools(BaseManager):
             download_tool (Literal["aria2", "requests", "urllib"] | None): 高速下载使用的下载器.
             download_num_threads (int): 高速下载线程数.
             download_progress (bool): 高速下载时是否显示下载进度.
+            use_group_mirror (bool): 是否启用分组镜像, 每组文件下载完成后作为一次提交上传, 并根据剩余磁盘空间动态规划每组文件.
+            group_size (int): 分组镜像时每组的最大文件数量.
+            reserved_disk_space_gb (float): 分组镜像时保留不使用的磁盘空间 (GB).
+            work_dir (str | None): 分组镜像时的临时下载目录, 同时用于计算剩余磁盘空间, 为 None 时使用系统临时目录.
         """
         if src_repo not in ["huggingface", "modelscope"]:
             logger.error("未知的镜像仓库类型: %s", src_repo)
@@ -180,6 +188,10 @@ class RepoMirrorTools(BaseManager):
             download_tool=download_tool,
             download_split=download_num_threads,
             download_progress=download_progress,
+            use_group_mirror=use_group_mirror,
+            group_size=group_size,
+            reserved_disk_space_gb=reserved_disk_space_gb,
+            work_dir=Path(work_dir) if work_dir else None,
         )
         src_repo_url = self.generate_repo_url(
             api_type=src_repo,
